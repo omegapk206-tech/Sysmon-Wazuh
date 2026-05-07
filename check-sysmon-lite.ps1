@@ -1,81 +1,89 @@
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$OutputEncoding = [Console]::OutputEncoding
 
-$SysmonPath = @("C:\Windows\sysmon64.exe", "C:\Windows\sysmon.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-$WazuhDir  = @("C:\Program Files (x86)\ossec-agent", "C:\Program Files\ossec-agent") | Where-Object { Test-Path $_ } | Select-Object -First 1
+# 1. DEFINICJA ŚCIEŻEK - SZUKAMY TWOJEJ BINARKI
+# Sysnative to tunel, który pozwala 32-bitowemu Wazuhowi wejść do C:\Windows\
+$Paths = @(
+    "$env:WinDir\sysnative\Sysmon64.exe", 
+    "C:\Windows\Sysmon64.exe",
+    "$env:WinDir\System32\Sysmon64.exe"
+)
 
-$Version = 0
-$StartConfigHash = ""
-$LiveConfigHash = ""
-$SharedConfigHash = ""
-$ReloadAttempted = $false
-$ReloadSucceeded = $false
+$SysmonPath = ""
+foreach ($p in $Paths) { 
+    if (Test-Path $p) { 
+        $SysmonPath = $p
+        break 
+    } 
+}
 
-# Confirm what version--if any--of Sysmon is present. A version of zero means Sysmon is absent.
+$WazuhDir = if (Test-Path "C:\Program Files (x86)\ossec-agent") { "C:\Program Files (x86)\ossec-agent" } else { "C:\Program Files\ossec-agent" }
+
+$Version = "0"; $LiveHash = "BRAK"; $SharedHash = "BRAK"; $ReloadAttempted = "false"; $ReloadSucceeded = "false"
+
+# 2. POBIERANIE DANYCH Z SYSMONA
 if ($SysmonPath) {
-    try {
-        $Version = (Get-Item $SysmonPath).VersionInfo.FileVersion
-    } catch {
-        $Version = 0
+    try { $Version = (Get-Item $SysmonPath).VersionInfo.FileVersion } catch { $Version = "BLAD_UPRAWNIEN" }
+    
+    # Próba wyciągnięcia hasha
+    $RawOutput = & $SysmonPath -c -accepteula 2>&1 | Out-String
+    if ($RawOutput -match 'SHA256=([A-Fa-f0-9]{64})') {
+        $LiveHash = $Matches[1].ToUpper()
     }
+} else {
+    $Version = "NIE_ZNALEZIONO_SYSMON64_EXE"
 }
 
-# Bail with terse output if Sysmon absent.
-if ($Version -eq 0) {
-    $result = @{
-        "check-sysmon.version" = "$Version"
+# 3. POBIERANIE HASHU Z PLIKU WAZUHA (Shared)
+$SharedConfigPath = Join-Path $WazuhDir "shared\sysmonconfig.xml"
+if (Test-Path $SharedConfigPath) {
+    $SharedHash = (Get-FileHash -Path $SharedConfigPath -Algorithm SHA256).Hash.ToUpper()
+}
+
+# 4. LOGIKA UNIWERSALNA (Reload jeśli BRAK lub inne hashe)
+if ($SharedHash -ne "BRAK") {
+    $NeedsReload = $false
+    $StartStatus = $LiveHash
+
+    if ($LiveHash -eq "BRAK") {
+        # Scenariusz dla komputerów gdzie nie da się odczytać hasha
+        $NeedsReload = $true
+        $StartStatus = "BYL_BRAK_WYMUSZONO"
+    } 
+    elseif ($LiveHash -ne $SharedHash) {
+        # Scenariusz gdy konfig jest po prostu stary
+        $NeedsReload = $true
     }
-    [Console]::WriteLine(($result | ConvertTo-Json -Compress))
-    exit 0
-}
 
-# Get live Sysmon config hash
-$ConfigHashLine = (& $SysmonPath -c 2>$null) | Where-Object { $_ -match '^\s*-\s*Config hash:\s*SHA256=' } | Select-Object -First 1
-if ($ConfigHashLine -and ($ConfigHashLine -match 'SHA256=([A-Fa-f0-9]{64})')) {
-    $LiveConfigHash = $Matches[1].ToUpper()
-}
-
-# Compare to shared config and reload if needed
-if ($LiveConfigHash) {
-    $StartConfigHash = $LiveConfigHash
-    $SharedConfigPath = Join-Path $WazuhDir "shared\sysmonconfig.xml"
-
-    if (Test-Path $SharedConfigPath) {
-        $SharedConfigHash = (Get-FileHash -Path $SharedConfigPath -Algorithm SHA256).Hash.ToUpper()
-
-        if ($LiveConfigHash -ne $SharedConfigHash) {
-            $ReloadAttempted = $true
-
-            # Suppress all stdout/stderr from Sysmon reload command
-            & $SysmonPath -c $SharedConfigPath > $null 2>&1
-
-            Start-Sleep -Milliseconds 500
-
-            # Reacquire live hash
-            $ConfigHashLine = (& $SysmonPath -c 2>$null) | Where-Object { $_ -match '^\s*-\s*Config hash:\s*SHA256=' } | Select-Object -First 1
-            if ($ConfigHashLine -and ($ConfigHashLine -match 'SHA256=([A-Fa-f0-9]{64})')) {
-                $LiveConfigHash = $Matches[1].ToUpper()
+    if ($NeedsReload -and $SysmonPath) {
+        $ReloadAttempted = "true"
+        # PRZEŁADOWANIE
+        & $SysmonPath -c $SharedConfigPath -accepteula > $null 2>&1
+        Start-Sleep -Seconds 2
+        
+        # Sprawdzenie czy teraz widać hash
+        $RawAfter = & $SysmonPath -c -accepteula 2>&1 | Out-String
+        if ($RawAfter -match 'SHA256=([A-Fa-f0-9]{64})') {
+            $EndHash = $Matches[1].ToUpper()
+            if ($EndHash -eq $SharedHash) { 
+                $ReloadSucceeded = "true"
+                $LiveHash = $EndHash 
             }
-
-            if ($LiveConfigHash -eq $SharedConfigHash) {
-                $ReloadSucceeded = $true
-            }
+        } else {
+            # Jeśli nadal BRAK, ale Sysmon przyjął komendę (ExitCode 0)
+            if ($LASTEXITCODE -eq 0) { $ReloadSucceeded = "true" }
         }
     }
 }
 
-# Report findings and results as a single-line JSON record
+# 5. JSON - WYNIK DLA DASHBOARDU
 $result = [ordered]@{
-    "check-sysmon.version" = "$Version"
-    "check-sysmon.start_config_hash" = "$StartConfigHash"
-    "check-sysmon.target_config_hash" = "$SharedConfigHash"
-    "check-sysmon.end_config_hash" = "$LiveConfigHash"
-    "check-sysmon.reload_attempted" = if ($ReloadAttempted) { "true" } else { "false" }
-}
-
-if ($ReloadAttempted) {
-    $result["check-sysmon.reload_succeeded"] = if ($ReloadSucceeded) { "true" } else { "false" }
+    "check-sysmon.version"           = $Version
+    "check-sysmon.start_config_hash" = $StartStatus
+    "check-sysmon.target_config_hash" = $SharedHash
+    "check-sysmon.end_config_hash"   = $LiveHash
+    "check-sysmon.reload_attempted"  = $ReloadAttempted
+    "check-sysmon.reload_succeeded"  = $ReloadSucceeded
 }
 
 [Console]::WriteLine(($result | ConvertTo-Json -Compress))
