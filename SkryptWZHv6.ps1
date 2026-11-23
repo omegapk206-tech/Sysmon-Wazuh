@@ -4,14 +4,23 @@
 .DESCRIPTION
     Skrypt pomija konta: motoadmin2, omega, wbudowany Administrator oraz konta wyłączone.
     Wymaga uruchomienia z uprawnieniami administracyjnymi (ESET Local System).
+    Lokalizacja pliku: C:\!APP\SkryptWZHv6.ps1
 #>
 
 # --- Konfiguracja ---
 $WykluczoneKonta = @("motoadmin2", "omega", "Administrator")
-$NazwaSkryptu = "SkryptWZHv6"
+$NazwaSkryptu     = "SkryptWZHv6"
+$KatalogSkryptu   = "C:\!APP"
 
 # Logowanie startowe
 Write-Output "[$NazwaSkryptu] Rozpoczęcie działania..."
+
+# Weryfikacja katalogu C:\!APP (informacyjnie)
+if (-not (Test-Path -LiteralPath $KatalogSkryptu)) {
+    Write-Warning "[$NazwaSkryptu] Katalog $KatalogSkryptu nie istnieje. Sprawdź dystrybucję pliku."
+} else {
+    Write-Output "[$NazwaSkryptu] Katalog roboczy: $KatalogSkryptu"
+}
 
 # Pobranie listy kont lokalnych
 try {
@@ -26,23 +35,22 @@ $PominieteKonta = 0
 
 foreach ($Konto in $KontaLokalne) {
     $Nazwa = $Konto.Name
-    
-    # 1. Sprawdzenie wykluczeń (nazwa)
+
+    # 1. Wykluczenia po nazwie
     if ($WykluczoneKonta -contains $Nazwa) {
         Write-Output "[$NazwaSkryptu] Pomijam (wykluczone): $Nazwa"
         $PominieteKonta++
         continue
     }
 
-    # 2. Sprawdzenie czy konto jest wbudowane (SID kończący się na -500 to wbudowany Administrator)
-    #    Chociaż wykluczyliśmy "Administrator" po nazwie, to zabezpieczenie na wypadek zmiany nazwy.
+    # 2. Wbudowany Administrator (SID kończący się na -500) – zabezpieczenie na wypadek zmiany nazwy
     if ($Konto.SID.Value -like "*-500") {
         Write-Output "[$NazwaSkryptu] Pomijam (wbudowany Administrator): $Nazwa"
         $PominieteKonta++
         continue
     }
 
-    # 3. Sprawdzenie czy konto jest wyłączone
+    # 3. Konto wyłączone
     if (-not $Konto.Enabled) {
         Write-Output "[$NazwaSkryptu] Pomijam (konto wyłączone): $Nazwa"
         $PominieteKonta++
@@ -50,8 +58,6 @@ foreach ($Konto in $KontaLokalne) {
     }
 
     # 4. Wymuszenie zmiany hasła przy następnym logowaniu
-    # Używamy net user, ponieważ Set-LocalUser nie ma bezpośredniego parametru do wymuszenia zmiany,
-    # a PasswordNeverExpires=$true (zgodnie z opisem) blokuje standardowe metody.
     try {
         $Wynik = net user $Nazwa /logonpasswordchg:yes 2>&1
         if ($LASTEXITCODE -eq 0) {
