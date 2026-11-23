@@ -1,11 +1,9 @@
 
 $ErrorActionPreference = "Stop"
-
 $LogDirectory = "C:\!APP"
 $LogPath = Join-Path $LogDirectory "WymuszenieZmianyHasla.log"
-$NetExe = "$env:SystemRoot\System32\net.exe"
 
-if (-not (Test-Path $LogDirectory)) {
+if (!(Test-Path $LogDirectory)) {
     New-Item -Path $LogDirectory -ItemType Directory -Force | Out-Null
 }
 
@@ -15,16 +13,22 @@ function Write-Log {
 }
 
 try {
-    Write-Log "========== START SKRYPTU =========="
+    Write-Log "========== START SKRYPTWZHv6 =========="
 
     $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
 
-    if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw "Brak uprawnien administratora."
+    if (!$Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Log "Brak uprawnien - uruchamiam ponownie jako administrator."
+        $Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        $Process = Start-Process -FilePath "$PSHOME\powershell.exe" -ArgumentList $Arguments -Verb RunAs -Wait -PassThru
+        Write-Log "Proces administratora zakonczony. Kod: $($Process.ExitCode)"
+        exit $Process.ExitCode
     }
 
-    Write-Log "Konfiguracja polityki hasel."
+    Write-Log "Uruchomiono z uprawnieniami administratora."
+
+    $NetExe = "$env:SystemRoot\System32\net.exe"
 
     & $NetExe accounts /minpwlen:8 /uniquepw:24 /minpwage:5
 
@@ -32,23 +36,24 @@ try {
         throw "Blad konfiguracji polityki hasel: $LASTEXITCODE"
     }
 
+    Write-Log "Polityka hasel skonfigurowana."
+
     Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Stop
 
-    $ExcludedUsers = @("motoadmin2", "omega")
-
+    $Excluded = @("motoadmin2", "omega")
     $Success = 0
     $Skipped = 0
     $Failed = 0
 
     foreach ($User in Get-LocalUser) {
 
-        if (-not $User.Enabled) {
+        if (!$User.Enabled) {
             Write-Log "POMINIETO: $($User.Name) - konto wylaczone."
             $Skipped++
             continue
         }
 
-        if ($ExcludedUsers -contains $User.Name.ToLowerInvariant()) {
+        if ($Excluded -contains $User.Name) {
             Write-Log "POMINIETO: $($User.Name) - konto chronione."
             $Skipped++
             continue
@@ -63,40 +68,42 @@ try {
         try {
             Write-Log "PRZETWARZANIE: $($User.Name)"
 
-            # Wylaczenie Password never expires
-            Set-LocalUser -Name $User.Name -PasswordNeverExpires $false -ErrorAction Stop
+            $AdsiUser = [ADSI]("WinNT://{0}/{1},user" -f $env:COMPUTERNAME, $User.Name)
 
-            # Wymaganie hasla
-            & $NetExe user "$($User.Name)" /passwordreq:yes
+            # Haslo wymagane
+            $AdsiUser.Put("PasswordRequired", [bool]$true)
 
-            if ($LASTEXITCODE -ne 0) {
-                throw "NET USER passwordreq error: $LASTEXITCODE"
-            }
+            # Usuniecie Password never expires
+            $Flags = [int]$AdsiUser.Get("UserFlags")
+            $Flags = $Flags -band (-bnot 0x10000)
+            $AdsiUser.Put("UserFlags", $Flags)
 
-            # Wymuszenie zmiany hasla przez ADSI
-            $AdsiUser = [ADSI]"WinNT://$env:COMPUTERNAME/$($User.Name),user"
-
+            # Wymuszenie zmiany hasla
             $AdsiUser.Put("PasswordExpired", [int]1)
+
             $AdsiUser.SetInfo()
 
-            # Weryfikacja ustawien
-            $Check = Get-LocalUser -Name $User.Name
-            $AdsiCheck = [ADSI]"WinNT://$env:COMPUTERNAME/$($User.Name),user"
+            # Ponowne odczytanie ustawien
+            $Check = [ADSI]("WinNT://{0}/{1},user" -f $env:COMPUTERNAME, $User.Name)
 
-            if (-not $Check.PasswordRequired) {
-                throw "PasswordRequired = False"
+            $Required = [bool]$Check.Get("PasswordRequired")
+            $Expired = [int]$Check.Get("PasswordExpired")
+            $CheckFlags = [int]$Check.Get("UserFlags")
+            $NeverExpires = (($CheckFlags -band 0x10000) -ne 0)
+
+            if (!$Required) {
+                throw "PasswordRequired nie zostal ustawiony."
             }
 
-            if ($Check.PasswordNeverExpires) {
-                throw "PasswordNeverExpires = True"
-            }
-
-            if ([int]$AdsiCheck.Get("PasswordExpired") -ne 1) {
+            if ($Expired -eq 0) {
                 throw "PasswordExpired nie zostal ustawiony."
             }
 
-            Write-Log "OK: $($User.Name) - haslo wymagane, wygasanie wlaczone, zmiana przy nastepnym logowaniu wymagana."
+            if ($NeverExpires) {
+                throw "Password never expires nadal jest aktywne."
+            }
 
+            Write-Log "OK: $($User.Name) - haslo wymagane, wygasanie wylaczone, zmiana przy nastepnym logowaniu."
             $Success++
         }
         catch {
