@@ -1,34 +1,19 @@
-# =====================================================
-# POLITYKA HASEL WINDOWS 11
-# Wszystkie konta lokalne poza:
-# Motoadmin2, Omega i kontami systemowymi
-# =====================================================
 
-# Konta wyłączone z polityki
-$ExcludedUsers = @(
-    "Motoadmin2",
-    "Omega"
-)
+$ErrorActionPreference = "Stop"
 
-# 1. Ustawienia lokalnej polityki haseł
-Write-Host "Konfiguracja polityki haseł..." -ForegroundColor Cyan
+$ExcludedUsers = @("Motoadmin2", "Omega")
 
-# Minimalna długość hasła: 10 znaków
 net accounts /minpwlen:10
-
-# Maksymalny okres ważności: 365 dni
 net accounts /maxpwage:365
-
-# Minimalny okres między zmianami: 1 dzień
 net accounts /minpwage:1
-
-# Historia: zapamiętywanie 5 poprzednich haseł
 net accounts /uniquepw:5
 
-# 2. Włączenie wymogu złożoności haseł
-secedit /export /cfg "$env:TEMP\password-policy.cfg" /quiet
+$PolicyFile = "$env:TEMP\password-policy.cfg"
+$DatabaseFile = "$env:TEMP\password-policy.sdb"
 
-$config = Get-Content "$env:TEMP\password-policy.cfg"
+secedit /export /cfg $PolicyFile /quiet
+
+$config = Get-Content $PolicyFile
 
 if ($config -match 'PasswordComplexity\s*=') {
     $config = $config -replace 'PasswordComplexity\s*=\s*\d+', 'PasswordComplexity = 1'
@@ -37,13 +22,9 @@ else {
     $config += "PasswordComplexity = 1"
 }
 
-Set-Content "$env:TEMP\password-policy.cfg" $config -Encoding Unicode
+Set-Content $PolicyFile $config -Encoding Unicode
 
-secedit /configure /db "$env:TEMP\password-policy.sdb" `
-    /cfg "$env:TEMP\password-policy.cfg" /areas SECURITYPOLICY /quiet
-
-# 3. Ustawienie wymuszania zmiany hasła
-Write-Host "Konfiguracja kont użytkowników..." -ForegroundColor Cyan
+secedit /configure /db $DatabaseFile /cfg $PolicyFile /areas SECURITYPOLICY /quiet
 
 $Users = Get-LocalUser | Where-Object {
     $_.Enabled -eq $true -and
@@ -52,35 +33,10 @@ $Users = Get-LocalUser | Where-Object {
 }
 
 foreach ($Account in $Users) {
-
-    try {
-        # Hasło wygasa zgodnie z polityką 365 dni
-        Set-LocalUser -Name $Account.Name `
-            -PasswordNeverExpires $false
-
-        # Użytkownik musi zmienić hasło przy następnym logowaniu
-        Set-LocalUser -Name $Account.Name `
-            -PasswordExpired $true
-
-        Write-Host "Skonfigurowano: $($Account.Name)" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Błąd: $($Account.Name) - $_" -ForegroundColor Red
-    }
+    Set-LocalUser -Name $Account.Name -PasswordNeverExpires $false
+    Set-LocalUser -Name $Account.Name -PasswordExpired $true
 }
 
-# 4. Wyświetlenie aktualnej polityki
-Write-Host "`nAktualna polityka haseł:" -ForegroundColor Yellow
-net accounts
-
-Write-Host "`nZakończono konfigurację." -ForegroundColor Green
-# Przypominanie 14 dni przed wygaśnięciem hasła
 $RegistryPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 
-Set-ItemProperty `
-    -Path $RegistryPath `
-    -Name "PasswordExpiryWarning" `
-    -Value 14 `
-    -Type DWord
-
-Write-Host "Ustawiono przypomnienie 14 dni przed wygaśnięciem hasła."
+Set-ItemProperty -Path $RegistryPath -Name "PasswordExpiryWarning" -Value 14 -Type DWord
