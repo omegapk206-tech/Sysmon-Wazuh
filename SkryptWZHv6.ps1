@@ -34,7 +34,10 @@ $Users = Get-LocalUser | Where-Object {
 
 foreach ($Account in $Users) {
     Set-LocalUser -Name $Account.Name -PasswordNeverExpires $false
-    Set-LocalUser -Name $Account.Name -PasswordExpired $true
+
+    $UserObject = [ADSI]"WinNT://$env:COMPUTERNAME/$($Account.Name),user"
+    $UserObject.PasswordExpired = 1
+    $UserObject.SetInfo()
 }
 
 $RegistryPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
